@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased (branch `corbin`, from 0.7.0)
+
+### Dependencies
+
+- Use rtnetlink 0.24 (was 0.21). It needs nix ^0.31.3, the nix version that patchbay already
+  uses, so a build has one nix. The public API of patchbay does not change.
+
 ## [0.7.0](https://github.com/n0-computer/patchbay/compare/patchbay-v0.6.0..0.7.0) - 2026-07-27
 
 ### ⛰️  Features
