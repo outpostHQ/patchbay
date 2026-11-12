@@ -18,6 +18,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use rustix::ioctl::{ioctl, opcode, Opcode, Setter};
 use tracing::{debug, trace, warn};
 
 /// Well-known NAT64 prefix (RFC 6052).
@@ -30,7 +31,8 @@ pub(crate) const NAT64_V4_POOL: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 64);
 // ── TUN device creation ─────────────────────────────────────────────────
 
 // Linux TUN/TAP ioctl constants.
-const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
+/// `TUNSETIFF` (`_IOW('T', 202, int)`), whose argument is a pointer to a `struct ifreq`.
+const TUNSETIFF: Opcode = opcode::write::<libc::c_int>(b'T', 202);
 const IFF_TUN: libc::c_short = 0x0001;
 const IFF_NO_PI: libc::c_short = 0x1000;
 
@@ -40,8 +42,6 @@ struct IfReq {
     ifr_flags: libc::c_short,
     _pad: [u8; 22],
 }
-
-nix::ioctl_write_ptr_bad!(tunsetiff, TUNSETIFF, IfReq);
 
 /// Creates a TUN device with the given name. Returns the file descriptor.
 ///
@@ -65,8 +65,10 @@ pub(crate) fn create_tun(name: &str) -> Result<OwnedFd> {
     let copy_len = name_bytes.len().min(libc::IFNAMSIZ - 1);
     ifr.ifr_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
 
-    // SAFETY: raw_fd is a valid open fd to /dev/net/tun, ifr is properly initialized.
-    unsafe { tunsetiff(raw_fd, &ifr) }.context("TUNSETIFF ioctl")?;
+    // SAFETY: `TUNSETIFF` reads one `struct ifreq`, and `IfReq` has its layout.
+    let request = unsafe { Setter::<TUNSETIFF, IfReq>::new(ifr) };
+    // SAFETY: `fd` is an open /dev/net/tun, and `request` carries a full `IfReq`.
+    unsafe { ioctl(&fd, request) }.context("TUNSETIFF ioctl")?;
 
     // Set non-blocking mode (required for tokio AsyncFd).
     let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };

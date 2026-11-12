@@ -4,8 +4,18 @@
 
 ### Dependencies
 
-- Use rtnetlink 0.24 (was 0.21). It needs nix ^0.31.3, the nix version that patchbay already
-  uses, so a build has one nix. The public API of patchbay does not change.
+- Send route netlink requests with `netlink-proto` 0.12 and `netlink-packet-route` 0.31, the
+  stack of `netwatch` 0.19, in place of rtnetlink. A build that also links iroh 1.x gets no
+  netlink crate version that iroh does not already use.
+- Use rustix in place of nix for `unshare`, `setns`, `gettid`, the user IDs and the `TUNSETIFF`
+  ioctl. nix turned on the libc feature `extra_traits`, so libc was built twice.
+- The public API of patchbay does not change with the default features.
+
+### Features
+
+- New default feature `dns` holds the lab DNS server (`Lab::dns_server`, `Lab::resolve`,
+  `DnsServer`) and its hickory-proto dependency. hickory-proto turns on the once_cell feature
+  `critical-section`, so a build without `dns` builds once_cell once.
 
 ## [0.7.0](https://github.com/n0-computer/patchbay/compare/patchbay-v0.6.0..0.7.0) - 2026-07-27
 
