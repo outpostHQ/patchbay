@@ -97,6 +97,20 @@ pub(crate) struct RouterConfig {
     pub ra_lifetime_secs: u64,
 }
 
+/// A renewed IPv4 address of a device interface, from [`NetworkCore::renew_device_ip`].
+pub(crate) struct Renewal {
+    /// Namespace of the device.
+    pub(crate) ns: Arc<str>,
+    /// Address to remove.
+    pub(crate) old_ip: Ipv4Addr,
+    /// Address to add.
+    pub(crate) new_ip: Ipv4Addr,
+    /// Prefix length of both addresses.
+    pub(crate) prefix_len: u8,
+    /// IPv4 default gateway, when the interface carries the default route.
+    pub(crate) gw: Option<Ipv4Addr>,
+}
+
 /// Parameters needed to (re-)configure NAT on a router.
 #[allow(dead_code)]
 pub(crate) struct RouterNatParams {
@@ -1617,13 +1631,9 @@ impl NetworkCore {
         Ok(dev.ns.clone())
     }
 
-    /// Allocates a new IP for a device interface, updates the record, returns
-    /// `(ns, old_ip, new_ip, prefix_len)`.
-    pub(crate) fn renew_device_ip(
-        &mut self,
-        dev_id: NodeId,
-        ifname: &str,
-    ) -> Result<(Arc<str>, Ipv4Addr, Ipv4Addr, u8)> {
+    /// Allocates a new IP for a device interface, updates the record, and
+    /// returns what the namespace needs to apply the change.
+    pub(crate) fn renew_device_ip(&mut self, dev_id: NodeId, ifname: &str) -> Result<Renewal> {
         let dev = self
             .device(dev_id)
             .ok_or_else(|| anyhow!("device removed"))?;
@@ -1643,10 +1653,21 @@ impl NetworkCore {
             .map(|c| c.prefix_len())
             .unwrap_or(24);
         let ns = dev.ns.clone();
+        let gw = if &*dev.default_via == ifname {
+            Some(self.router_downlink_gw_for_switch(sw_id)?)
+        } else {
+            None
+        };
         let new_ip = self.alloc_from_switch(sw_id)?;
         let dev = self.device_mut(dev_id).unwrap();
         dev.iface_mut(ifname).unwrap().ip = Some(new_ip);
-        Ok((ns, old_ip, new_ip, prefix_len))
+        Ok(Renewal {
+            ns,
+            old_ip,
+            new_ip,
+            prefix_len,
+            gw,
+        })
     }
 
     // ── Link target resolution ───────────────────────────────────────
