@@ -106,7 +106,7 @@ fn setup_namespace_thread(
 /// namespace's state instead of the host's. Without this, libraries that read
 /// `/proc/net/route` (e.g. netwatch) get the host's default route interface.
 fn apply_mount_overlay(overlay: Option<&DnsOverlay>) {
-    if let Err(e) = unshare(UnshareFlags::NEWNS) {
+    if let Err(e) = unshare_namespaces(UnshareFlags::NEWNS) {
         tracing::warn!(
             "unshare(CLONE_NEWNS) failed: {e} — /proc and DNS overlays may show host data"
         );
@@ -163,9 +163,28 @@ fn fixup_proc_net() {
     }
 }
 
-/// Moves the calling thread into new namespaces of the kinds in `flags`.
-fn unshare(flags: UnshareFlags) -> rustix::io::Result<()> {
-    // SAFETY: the callers never pass `FILES`, so no thread loses its file descriptors.
+/// The kinds of namespace that [`unshare_namespaces`] takes.
+const NAMESPACES: UnshareFlags = UnshareFlags::NEWCGROUP
+    .union(UnshareFlags::NEWIPC)
+    .union(UnshareFlags::NEWNET)
+    .union(UnshareFlags::NEWNS)
+    .union(UnshareFlags::NEWPID)
+    .union(UnshareFlags::NEWTIME)
+    .union(UnshareFlags::NEWUSER)
+    .union(UnshareFlags::NEWUTS);
+
+/// Moves the calling thread into new namespaces of the kinds in `flags`. A flag that is not a
+/// namespace kind (`FILES`, `FS`, `SYSVSEM` and the like) is an `EINVAL` error.
+pub(crate) fn unshare_namespaces(flags: UnshareFlags) -> rustix::io::Result<()> {
+    if !NAMESPACES.contains(flags) {
+        return Err(rustix::io::Errno::INVAL);
+    }
+    // SAFETY: only `FILES` is unsound here: it gives this thread a table of its own, where a
+    // descriptor that another thread owns has another meaning. `flags` holds namespace kinds
+    // only. A new namespace changes what later calls of this thread see (links, mounts, ids),
+    // never memory or a descriptor that Rust code holds. The kernel adds `FS` to `NEWNS` and
+    // `NEWUSER`, which copies the root, the working directory and the umask, and `NEWUSER`
+    // fails with `EINVAL` in a process with more than one thread.
     unsafe { rustix::thread::unshare_unsafe(flags) }
 }
 
@@ -324,7 +343,7 @@ impl Worker {
             .spawn(move || {
                 let _guard = span.entered();
                 let init = (|| -> Result<(File, tokio::runtime::Runtime)> {
-                    unshare(UnshareFlags::NEWNET).context("unshare CLONE_NEWNET")?;
+                    unshare_namespaces(UnshareFlags::NEWNET).context("unshare CLONE_NEWNET")?;
                     let ns_fd = open_current_thread_netns_fd()?;
                     let mut builder = tokio::runtime::Builder::new_current_thread();
                     builder.enable_all();

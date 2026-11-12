@@ -11,6 +11,13 @@
   ioctl. nix turned on the libc feature `extra_traits`, so libc was built twice.
 - The public API of patchbay does not change with the default features.
 
+### Safety
+
+- Each raw call that rustix marks `unsafe` sits in one small safe function with a `SAFETY`
+  comment: `unshare_namespaces` takes only namespace flags (`FILES`, `FS`, `SYSVSEM` and the
+  like give `EINVAL`), and `open_tun` opens `/dev/net/tun` and runs `TUNSETIFF` on it with a
+  `struct ifreq` of the size that libc gives.
+
 ### Features
 
 - New default feature `dns` holds the lab DNS server (`Lab::dns_server`, `Lab::resolve`,
