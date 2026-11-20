@@ -13,8 +13,12 @@
 //! ```
 
 use std::{
+    mem::offset_of,
     net::{Ipv4Addr, Ipv6Addr},
-    os::fd::{AsRawFd, OwnedFd},
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::fs::OpenOptionsExt,
+    },
 };
 
 use anyhow::{Context, Result};
@@ -46,17 +50,24 @@ struct IfReq {
     _pad: [u8; IFREQ_PAD],
 }
 
+// The kernel reads and writes one `struct ifreq`, so `IfReq` must cover the same bytes.
 const _: () = assert!(size_of::<IfReq>() == size_of::<libc::ifreq>());
+const _: () = assert!(offset_of!(IfReq, ifr_flags) == offset_of!(libc::ifreq, ifr_ifru));
 
+/// Opens `/dev/net/tun` in non-blocking mode (required for tokio `AsyncFd`) and attaches it to the
+/// device that `request` names.
 fn open_tun(request: &mut IfReq) -> Result<std::fs::File> {
     let tun = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
+        .custom_flags(libc::O_NONBLOCK)
         .open("/dev/net/tun")
         .context("open /dev/net/tun")?;
-    // SAFETY: `IfReq` has the size and layout of `struct ifreq` (checked above).
-    let set = unsafe { ioctl(&tun, Updater::<TUNSETIFF, IfReq>::new(request)) };
-    set.context("TUNSETIFF ioctl")?;
+    // SAFETY: `tun` is an open `/dev/net/tun` fd, and `TUNSETIFF` is a valid request for it. The
+    // kernel reads one `struct ifreq` from the argument and writes the device name back into it.
+    // `IfReq` has the size and the field offsets of `struct ifreq` (checked above), and each bit
+    // pattern is a valid `IfReq`. `request` is an exclusive borrow that outlives the call.
+    unsafe { ioctl(&tun, Updater::<TUNSETIFF, IfReq>::new(request)) }.context("TUNSETIFF ioctl")?;
     Ok(tun)
 }
 
@@ -74,20 +85,8 @@ pub(crate) fn create_tun(name: &str) -> Result<OwnedFd> {
     let copy_len = name_bytes.len().min(libc::IFNAMSIZ - 1);
     ifr.ifr_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
 
-    let fd = open_tun(&mut ifr)?;
-    let raw_fd = fd.as_raw_fd();
-
-    // Set non-blocking mode (required for tokio AsyncFd).
-    let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error()).context("fcntl F_GETFL");
-    }
-    let ret = unsafe { libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-    if ret < 0 {
-        return Err(std::io::Error::last_os_error()).context("fcntl F_SETFL O_NONBLOCK");
-    }
-
-    Ok(OwnedFd::from(fd))
+    let tun = open_tun(&mut ifr)?;
+    Ok(OwnedFd::from(tun))
 }
 
 // ── SIIT header translation ─────────────────────────────────────────────
@@ -415,7 +414,11 @@ pub(crate) async fn run_nat64_loop(
         sync::{Arc, Mutex},
     };
 
-    let tun = tokio::io::unix::AsyncFd::new(tun_fd).context("AsyncFd on TUN")?;
+    // SAFETY: `OwnedFd` owns a valid open fd, and `as_raw_fd` always returns
+    // that same fd while the `AsyncFd` holds it.
+    let tun = unsafe { tokio::io::unix::AsyncFd::register(tun_fd) }
+        .map_err(std::io::Error::from)
+        .context("AsyncFd on TUN")?;
     let translations: Arc<Mutex<HashMap<(Ipv4Addr, u16), Ipv6Addr>>> =
         Arc::new(Mutex::new(HashMap::new()));
 

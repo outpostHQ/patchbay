@@ -92,18 +92,30 @@ impl Netlink {
     }
 
     pub(crate) async fn link_index(&self, ifname: &str) -> Result<u32> {
+        Ok(self.link(ifname).await?.header.index)
+    }
+
+    /// Returns whether `ifname` is administratively up.
+    pub(crate) async fn link_is_up(&self, ifname: &str) -> Result<bool> {
+        let link = self.link(ifname).await?;
+        Ok(link.header.flags.contains(LinkFlags::Up))
+    }
+
+    async fn link(&self, ifname: &str) -> Result<LinkMessage> {
         let mut query = LinkMessage::default();
         query
             .attributes
             .push(LinkAttribute::IfName(ifname.to_string()));
-        let replies = self
-            .ask(RouteNetlinkMessage::GetLink(query), 0)
-            .await
-            .with_context(|| format!("link not found: {ifname}"))?;
+        let replies = match self.ask(RouteNetlinkMessage::GetLink(query), 0).await {
+            Err(err) if os_error(&err) == Some(libc::ENODEV) => {
+                return Err(err.context(format!("link not found: {ifname}")));
+            }
+            other => other.with_context(|| format!("get link {ifname}"))?,
+        };
         replies
             .into_iter()
             .find_map(|reply| match reply {
-                RouteNetlinkMessage::NewLink(link) => Some(link.header.index),
+                RouteNetlinkMessage::NewLink(link) => Some(link),
                 _ => None,
             })
             .ok_or_else(|| anyhow!("link not found: {ifname}"))
@@ -111,7 +123,12 @@ impl Netlink {
 
     /// Deletes the link `ifname` if it exists.
     pub(crate) async fn ensure_link_deleted(&self, ifname: &str) -> Result<()> {
-        if let Ok(idx) = self.link_index(ifname).await {
+        let idx = match self.link_index(ifname).await {
+            Ok(idx) => Some(idx),
+            Err(err) if os_error(&err) == Some(libc::ENODEV) => None,
+            Err(err) => return Err(err),
+        };
+        if let Some(idx) = idx {
             trace!(ifname = %ifname, "delete link");
             let mut msg = LinkMessage::default();
             msg.header.index = idx;
@@ -462,8 +479,30 @@ fn family(ip: IpAddr) -> AddressFamily {
     }
 }
 
-fn is_eexist(err: &anyhow::Error) -> bool {
+/// Returns the errno of a kernel error from [`Netlink::ask`].
+fn os_error(err: &anyhow::Error) -> Option<i32> {
     err.downcast_ref::<io::Error>()
         .and_then(io::Error::raw_os_error)
-        == Some(libc::EEXIST)
+}
+
+fn is_eexist(err: &anyhow::Error) -> bool {
+    os_error(err) == Some(libc::EEXIST)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A link that does not exist gives `ENODEV`, and `ensure_link_deleted` skips it.
+    #[tokio::test]
+    async fn missing_link_is_enodev() -> Result<()> {
+        let (connection, netlink) = connect()?;
+        tokio::spawn(connection);
+
+        let err = netlink.link_index("pb-no-such-link").await.unwrap_err();
+        assert_eq!(os_error(&err), Some(libc::ENODEV), "{err:#}");
+        assert!(err.to_string().contains("link not found"), "{err:#}");
+
+        netlink.ensure_link_deleted("pb-no-such-link").await
+    }
 }
